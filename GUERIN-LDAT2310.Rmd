@@ -1,0 +1,817 @@
+---
+output: pdf_document
+fig_width: 6 
+fig_height: 4
+---
+
+```{r child='Frontpage.RMD'}
+```
+
+```{r echo=FALSE, include=FALSE}
+# Chargement des librairies et définition du répertoire de travail
+library(dplyr)
+library(ggplot2)
+library(MASS)
+library(knitr)
+library(mgcv)
+library(rpart)
+library(boot)
+library(reshape2)
+library(corrplot)
+library(knitr)
+library(gbm)
+
+
+
+setwd("~/Data science for insurance and finance/Project")
+
+train=read.table("DBtrain.csv",sep=";",header=T)[2:11]
+test=read.table("DBtest.csv",sep=",",header=T)[2:10]
+
+train$Gender = as.factor(train$Gender)
+train$Contract = as.factor(train$Contract)
+train$Power = as.factor(train$Power)
+train$Leasing = as.factor(train$Leasing)
+train$Area = as.factor(train$Area)
+train$Fract = as.factor(train$Fract)
+
+test$Gender = as.factor(test$Gender)
+test$Power = as.factor(test$Power)
+test$Leasing = as.factor(test$Leasing)
+test$Area = as.factor(test$Area)
+test$Fract = as.factor(test$Fract)
+test$Contract = as.factor(test$Contract)                    
+
+# dim(unique(claimfreq))
+
+```
+\newpage
+'\tableofcontents'
+\newpage
+
+# 1. Introduction
+
+This project aims to determine the determinants of the claim frequency. To identify those factors we will first understand the dataset with descriptive statistics before modeling the claim frequency with different models(GLM,decision tree,random forest and gradient boosting).
+
+We have at our disposal a training set of 60.000 observations and a test set of 20.000 observations.
+
+The claim frequency is not initially present in the training set and we construct the it as the ratio of the number of Claims by the exposure, and add it to the dataset.
+$ClaimFreq = \frac{Nbclaims}{Exposure}$
+
+# 2. Exploratory analysis
+
+To understand the data, start by looking at the distribution of the variables. Barplots are used for the categorical variables.
+
+```{r echo=FALSE, include=TRUE,fig.height=3, fig.width=10}
+
+tabsummary <-function(data,col_names){
+resum=matrix(ncol=length(col_names),nrow=7)
+colnames(resum)=col_names
+rownames(resum)=c("Mean","Median","Standard deviation","Q25","Q75","Min","Max")
+
+  for(c in 1 : length(col_names)){
+    resum[1,c]=mean(data[,c])
+    resum[2,c]=median(data[,c])
+    resum[3,c]=sd(data[,c])
+    resum[4,c]=quantile(data[,c],0.25)
+    resum[5,c]=quantile(data[,c],0.75)
+    resum[6,c]=min(data[,c])
+    resum[7,c]=max(data[,c])
+  }
+  resum=round(resum,2)
+  
+    }
+col_names=c("DriverAge", "CarAge", "Exposure")
+
+resum=tabsummary(train[-c(1,4,5,6,7,8,10)],col_names)
+kable(resum,caption="Descriptive statistics of the continuous variables")
+
+par(mfrow = c(1,2),oma = c(5,4,0,0) + 0.1,mar = c(0.5,0.5,1,1) + 0.1)
+
+Age    <- (floor(min(train[,2])):ceiling(max(train[,2])))
+carAge = (floor(min(train[,3])):ceiling(max(train[,3])))
+expo = (floor(min(train[,9])):ceiling(max(train[,9])))
+
+barplot(table(train[,2]), main="Age of the driver",names.arg=Age,col="darkblue")
+barplot(table(train[,3]), main="Car age",names.arg=carAge,col="darkblue")
+barplot(table(round(train[,9],0)), main="Exposure",names.arg=expo,col="darkblue")
+
+barplot(table(train[,1]), main="Gender",names.arg=c("Men","Women"),col="darkblue")
+barplot(table(train[,4]), main="Area",names.arg=c("suburban","urban","countryside ","Mountains"),col="darkblue")
+barplot(table(train[,5]), main="Leasing",names.arg=c("Yes","No"),col="darkblue")
+barplot(table(train[,10]), main="Number of claims",names.arg=c("0","1","2"),col="darkblue")
+barplot(table(train[,6]), main="Horsepower of the car",names.arg=c("low","normal","intermediate","high"),col="darkblue")
+barplot(table(train[,7]), main="Splitting of the premium",names.arg=c("Monthly","Quarterly","Yearly"),col="darkblue")
+barplot(table(train[,8]), main="Types of contract",names.arg=c("Basic","intermediate","full"),col="darkblue")
+  
+```
+
+
+The typical insured person is a man of 43 years living in city owning a 5 year old car with a Horsepower in the normal category. He is unsured by an intermediate type of contract, pays his prime yearly, has no leasing or claims and has been insured for 3 years. 
+
+Besides this general picture, We can notice that:
+- The drivers of 18 years old are over-represented.
+97.3% of the individuals never had any claims.
+
+
+After first exploration, we plot the explanative variables against the claim frequency to get an hint about the variables associated with the claim frequency, although interactions between variables are not taken into account yet.
+
+```{r echo=FALSE, include=TRUE,fig.height=3, fig.width=10}
+train$ClaimFreq = train$Nbclaims/train$Exposure
+
+
+cats = list(c("Men","Women"),c("suburban","urban","countryside ","Mountains"),c("Yes","No"),c("low","normal","intermediate","high"),c("Monthly","Quarterly","Yearly"),c("Basic","intermediate","full"))
+
+par(mfrow = c(1,2))
+j=1
+for (i in c(1,4,5,6,7,8) ){
+plot(train[,i], train$ClaimFreq,main=colnames(train[i]), ylab="Claim Frequency (per year) ",col="darkblue", pch=19)
+j=j+1
+}
+
+
+plot(train[,2], train$ClaimFreq,main=colnames(train[2]),xlab="Driver age", ylab="Claim Frequency (per year) ",col="darkblue", pch=19)
+
+plot(train[,3], train$ClaimFreq,main=colnames(train[3]),xlab="Car age", ylab="Claim Frequency (per year) ",col="darkblue", pch=19)
+
+
+```
+
+```{r echo=FALSE, include=TRUE,fig.height=4, fig.width=4}
+
+plot(train[,9], train$ClaimFreq,main=colnames(train[9]),xlab="Exposure", ylab="Claim Frequency (per year) ",col="darkblue", pch=19)
+
+```
+
+We can observe that:
+
+-the highest Claim frequencies are achieved by men. 
+
+-Customers living in urban areas tend to have a higher claim frequency than others.
+
+-The leasing does not seems to be a major factor, considering the mean of the two groups.
+
+-Customers owning a low horsepower car have a tend ot have a lower claim frequency, 
+
+-There is more outliers in the high horsepower category, indicating that a small number of individuals with powerful cars have a large number of claims. 
+
+-The splitting of the premium does not seems to differentiate the customers. 
+
+Finally, in average, customer who beneficiate of a full contract have higher claim frequencies.
+
+
+For more details, means and standard deviations by categories are available in annexe.
+
+It is also important to check if the training and tests variables have similar distributions, and if it wasn't the case some adjustements would be necessary to obtain the best possible fit. After comparing the distributions of the continuous variables and analysing the bar plots of the categorical variables, the two datasets seems identical from a statistical point a view. Test set statistics can be found in annexe.
+
+```{r echo=FALSE, include=TRUE,fig.height=3, fig.width=3}
+
+# library(caret)
+# trainControl = trainControl(method="repeatedcv",number=5, repeats = 1)
+# linmod1 = train(Nbclaims ~ Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract+Exposure, data = train,method = "glmnet",trControl = trainControl)
+# 
+# summary(linmod1)
+# 
+# plot(train$Nbclaims,resid(linmod1),main= "Residuals vs target (cross terms included)",xlab = "Number of claims")
+# a=data.frame(resid(linmod1))
+# 
+# linmod1$results
+
+```
+\newpage
+# 3.Modeling
+
+## 3.1 Generalized linear model
+
+Our first model is a generalized linear model, and more specifically a poisson regression with the variable $Exposure$ as offset. The non significative variables are eliminated using a stepwise backward selection, taking AIC as criterion.
+
+```{r echo=FALSE, include=FALSE}
+# remove number of claim from data to avoid using it to model
+set.seed(1)
+
+glm1 = glm(formula=Nbclaims ~ Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract,offset=log(Exposure), data = train,family=poisson(link="log"))
+summary(glm1)
+glm_cut=step(glm1)
+summary(glm_cut)
+
+```
+
+
+```{r echo=FALSE, include=TRUE}
+coeff_table=matrix(nrow=13,ncol=4)
+rownames(coeff_table)=names(coef(glm_cut))
+colnames(coeff_table)=c("Estimate","Std. Error","z value","Pr(> abs(z))")
+coeff_table[,1]=summary(glm_cut)$coefficients[,1]
+coeff_table[,2]=summary(glm_cut)$coefficients[,2]
+coeff_table[,3]=summary(glm_cut)$coefficients[,3]
+coeff_table[,4]=summary(glm_cut)$coefficients[,4]
+kable(coeff_table,caption="Poisson regression parameters")
+
+
+deviance_table = matrix(nrow=1,ncol=2)
+deviance_table[,1]= glm_cut$null.deviance
+deviance_table[,2] = glm_cut$deviance
+colnames(deviance_table) = c("Null deviance","Residual deviance")
+kable(deviance_table,caption="Deviance indicators")
+#kable(sqrt(sum(glm1_cut$residuals^2))/length(row(train)),caption="Root mean square error")
+
+# # library(boot)
+# cost <- function(r, pi = 0) mean(abs(r-pi))
+# cost <- function(r, pi = 0) sqrt(mean((r-pi)^2))
+# tmp<-cv.glm(data=train,glm1_cut,cost,K=10)
+# tmp$delta
+# sqrt(mean(log(glm1_cut$residuals^2)))
+# library(boot)
+# sqrt(mean((train$ClaimFreq-exp(predict(glm1_cut,train)))^2))
+# 
+# mean(abs(train$ClaimFreq-exp(predict(glm1_cut,train))))
+
+```
+
+Two variables are dismissed: The driver age and the leasing.
+
+The Residual deviance and null deviance are close to each other, however the residual deviance is smaller,indicating a better fit. Moreover this closeness is not surprising considering the number of zeros in the response variable.
+
+At at risk of 5% one can observe that:
+
+* The women have a claim frequency 10.2% lower than men
+* The customers residing in Area3(Countryside) makes 19.5% less claims for a given duration, while difference between others areas is not significative.
+* There is a positive relationship between the claim frequency and the Horsepower of the car and owning a car with high horsepower raise the claim frequency of 20.1% compared to low horsepower owners.
+* Customers with a yearly splitting of the premium have a claims frequency reduced of 13.5% compared to others.
+* full contract subscripter make 32.3% more claim than other for a given duration. It is a clear case of *adverse selection*.
+
+Finally, we can see below that there is no overdispersion phenomenon.
+
+ the number of insurance claims within a population for a certain type of risk would be zero-inflated by those people who have not taken out insurance against the risk and thus are unable to claim
+
+One property of the poisson distribution is the equality of the mean and observed variance. If this property is not respected, for instance in the case of overdispersion, it can impede the model performance
+
+```{r echo=FALSE, include=TRUE}
+
+moment_table = matrix(nrow=1,ncol=2)
+moment_table[,1]= mean(train$Nbclaims/train$Exposure)
+moment_table[,2] = var(train$Nbclaims/train$Exposure)
+colnames(moment_table) = c("Mean","Variance")
+kable(moment_table,caption="Mean and variance of the claim frequency")
+```
+
+We can see there is no overdispersion phenomenon.Another phenomenon that could cause problem is the quantity of zeros from the response variable. We attempted to adress it with a zero-inflated model thanks to the package  \textbf{pscl}, but it did not produced valuable results.
+```{r echo=FALSE, include=TRUE}
+
+# library(pscl)
+# glm3 <- zeroinfl(Nbclaims ~ Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract+offset(log(Exposure)), data = train)
+
+
+# glm3 <- zeroinfl(Nbclaims ~ Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract+Exposure, data = train)
+# # 
+# summary(glm2)
+# preds = data.frame(exp(predict(glm3,train))/train$Exposure)
+
+# library(boot)
+# cost <- function(r, pi = 0) sqrt(mean((r-pi)^2))
+# tmp<-cv.glm(data=train,glm2,cost,K=10)
+# tmp$delta
+# sqrt(mean(log(glm2$residuals^2)))
+```
+
+## 3.2 Poisson regression tree
+
+The second model is a poisson regression tree
+ 
+ At each level of the tree the split point is chosen to minimize difference between the deviance of the parent node and the deviance of its two child nodes
+ <!-- $D_{left son} + D_{right son}$ -->
+ 
+ The deviances are computed assuming a poisson distribution of the response variable.
+
+<!-- ${\displaystyle D(y,{\hat {\mu }})=2{\Big (}\log p(y)-\log p(y\mid \hat{\mu}){\Big )}} = 2 \sum_{i} w_{i}(y_{i}logy_{i}-y_{i}log\hat{\mu}-y_{i}+\hat{\mu}_{i})$ -->
+
+<!-- Where $y$ is the Maximum likelihood estimate of a saturated model (perfect fit) and $\hat {\mu}_{i}$ the Maximum likelihood estimate of the actual model. -->
+
+A large tree is first grown, and a 10-fold cross-validation is used to estimate the generalization error of the models for different depths.
+
+
+```{r echo=FALSE, include=FALSE}
+
+set.seed(1)
+
+Ptree <-rpart(cbind(Exposure,Nbclaims)~Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract,data=train, method="poisson",control=rpart.control(cp=0.00053,xval=10),parms=list(shrink=1))
+tree.dev=printcp(Ptree)
+
+```
+
+```{r echo=FALSE, include=TRUE}
+kable(tree.dev,caption="Results")
+```
+
+The tree starts overfitting after the fourth split,therefore we set the depth of the tree to 4.
+
+The graph of this tree is plotted below. 
+```{r echo=FALSE, include=TRUE,fig.align="center"}
+library(rpart.plot)
+# set.seed(1)
+Ptree <-rpart(cbind(Exposure,Nbclaims)~Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract,data=train, method="poisson",control=rpart.control(cp=0.00071466,xval=10),parms=list(shrink=1))
+
+rpart.plot(Ptree,main = "Selected Poisson Regression tree",type=4,extra=1)
+```
+
+We can see that the most important factors is the type of contract.This observation can be linked with the analysis of the Poisson regression coefficients which revealed that those customer makes 32% more claims for a given duration compared to customers with other contracts.
+
+-If the customer has a full contract and own a categorized as having a horsepower of category 1, his estimated claim frequency is 0.008, to compare with 0.012 if he has more horsepower.
+
+-Countryside and mountains areas (3,4) are associated with lower claim frequencies if the customers have a basic or intermediate contract.
+
+
+## 3.4 Poisson Random Forest
+
+
+In this section we average the results of 100 Poisson Regression trees to reduce the variance of the estimator and improve our prediction. For each tree, a set of variables are sampled and used to grow the tree, and each tree is fitted on a different dataset generated by sampling with replacement from the real data.
+
+This two randomizations foster statistical independence between trees, and eventually reduce the variance of the final estimator.The trees are ideal candidate for ensembling given their high variance and low bias.
+
+To get a better understanding of the factor influencing the claim frequency, we segment the dataset into several customers profils:
+
+7 axis are explored: 
+
+1 - The gender
+
+2- The category
+
+3- The Car age
+
+4- The Area
+
+6- The Driver age
+
+7- The type of contract
+
+
+We use the following methodology: we fix some factors,for instance "gender"=1,  "Power"=1 and "CarAge" < 3 years,  then predict the claim frequency for each customer corresponding to this criterion. Finally we average the predictions, so that we can plot the curve of the average claim frequency for the male customer owning a less than 3 years old low horsepower car. This approach has the advantage of focusing on just a few factors, \textit{ceteris paribus}.
+
+### 3.4.1 CarAge,Horsepower and Gender variables
+
+In this part we analyse the variable CarAge,Power and Gender.
+
+Even if the car age was not a significative factor in the GLM analysis for a risk a 5%, it would have been considered at a risk of 10%. Hence we choose to include it in the analysis The "CarAge"" variable is discretized in 2 categories:
+
+1- $CarAge < 3$
+
+2- $CarAge >= 3$
+
+You can find the results below.
+
+
+```{r echo=FALSE, include=TRUE}
+
+# Segmentation of the customer by horsepower, sex, area and Car age
+
+
+segments = list(
+menlowpow = train[train$Gender == 1 & train$Power == 1,],
+mennormpow = train[train$Gender == 1 & train$Power == 2,],
+meninterpow = train[train$Gender == 1 & train$Power == 3,],
+menhigh = train[train$Gender == 1 & train$Power == 4,],
+# 5-8 women and horsepower
+womenlowpow = train[train$Gender == 2 & train$Power == 1,],
+womennormpow = train[train$Gender == 2 & train$Power == 2,],
+womeninterpow = train[train$Gender == 2 & train$Power == 3,],
+womenhighpow = train[train$Gender == 2 & train$Power == 4,],
+
+#9-12 men and area
+menarea1 = train[train$Gender == 1 & train$Area == 1,],
+menarea2 = train[train$Gender == 1 & train$Area == 2,],
+menarea3 = train[train$Gender == 1 & train$Area == 3,],
+menarea4 = train[train$Gender == 1 & train$Area == 4,],
+
+#13-16 women and area
+womenarea1 = train[train$Gender == 2 & train$Area == 1,],
+womenarea2 = train[train$Gender == 2 & train$Area == 2,],
+womenarea3 = train[train$Gender == 2 & train$Area == 3,],
+womenarea4 = train[train$Gender == 2 & train$Area == 4,],
+
+#17-20 men power and car age<3 years
+menlowpowage1 = train[train$Gender == 1 & train$Power == 1 & train$CarAge < 3,],
+mennormpowage1 = train[train$Gender == 1 & train$Power == 2 & train$CarAge < 3,],
+meninterpowage1 = train[train$Gender == 1 & train$Power == 3 & train$CarAge < 3,],
+menhighpowage1 = train[train$Gender == 1 & train$Power == 4 & train$CarAge < 3,],
+
+#21-24 women power and car age<3 years
+
+womenlowpowage1 = train[train$Gender == 2 & train$Power == 1 & train$CarAge < 3,],
+womennormpowage1 = train[train$Gender == 2 & train$Power == 2 & train$CarAge < 3,],
+womeninterpowage1 = train[train$Gender == 2 & train$Power == 3 & train$CarAge < 3,],
+womenhighpowage1 = train[train$Gender == 2 & train$Power == 4 & train$CarAge < 3,],
+
+menlowpowage2 = train[train$Gender == 1 & train$Power == 1 & train$CarAge >= 3,],
+mennormpowage2 = train[train$Gender == 1 & train$Power == 2 & train$CarAge >= 3,],
+meninterpowage2 = train[train$Gender == 1 & train$Power == 3 & train$CarAge >= 3,],
+menhighpowage2 = train[train$Gender == 1 & train$Power == 4 & train$CarAge >= 3,],
+
+womenlowpowage2 = train[train$Gender == 2 & train$Power == 1 & train$CarAge >= 3,],
+womennormpowage2 = train[train$Gender == 2 & train$Power == 2 & train$CarAge >= 3,],
+womeninterpowage2 = train[train$Gender == 2 & train$Power == 3 & train$CarAge >= 3,],
+womenhighpowage2 = train[train$Gender == 2 & train$Power == 4 & train$CarAge >= 3,])
+  #33-36: drivers ages
+ages = c(20,40,60)
+segments[[33]] = train[train$DriverAge < ages[1],]
+segments[[34]] = train[train$DriverAge > ages[1] & train$DriverAge < ages[2],]
+segments[[35]] = train[train$DriverAge > ages[2] & train$DriverAge < ages[3],]
+segments[[36]] = train[train$DriverAge > ages[3],]
+
+k= 37
+for  (i in 1:length(table(train$Contract))){
+segments[[k]] = train[train$DriverAge < ages[1] & train$Contract == i,]
+segments[[k+1]] = train[train$DriverAge > ages[1] & train$DriverAge < ages[2] & train$Contract == i,]
+segments[[k+2]] = train[train$DriverAge > ages[2] & train$DriverAge < ages[3] & train$Contract == i,]
+segments[[k+3]] = train[train$DriverAge > ages[3] & train$Contract == i,]
+  k=k+4
+}
+
+
+
+
+
+
+M    = 100         #number of samples
+nr   = nrow(train)  #size of the dataset
+size = nr      #size of the sample
+
+lambdaK = list()
+
+for (i in 1:length(segments)){
+lambdaK[[i]] = rep(0,nrow(segments[[i]]))
+}
+lambdaM <- matrix(0 , M,nrow(train))
+ageM    <- matrix(0 , M,nrow(train))
+
+dstar = 5;
+listcovariates=c("Gender","DriverAge","CarAge","Area","Leasing","Power","Fract","Contract")
+
+
+set.seed(10)
+
+for (ct in c(1:M))
+{
+    tmp     <-sample(nr,size, replace = TRUE, prob = NULL)
+    train2 <-train[tmp,]	
+
+    rndFact <-sample(8, dstar, replace = FALSE, prob = NULL)
+
+    equation=paste("cbind(Exposure,Nbclaims)~",listcovariates[rndFact[1]])
+    for (j in c(2:dstar)){	
+       t=paste(equation,listcovariates[rndFact[j]],sep="+")
+    }
+
+   d.tree <-rpart( equation,data=train2, method="poisson",
+                parms=list(shrink=1),control=rpart.control(cp=0.0002))
+
+   # if (!is.null(d.tree$csplit))
+   # {
+   #    plot(d.tree,main = "Regression tree, small d")
+   #    text(d.tree) #equivalent to labels(d.tree)
+   # }
+   
+for (i in 1:length(segments)){
+lambdaK[[i]] <-lambdaK[[i]]+predict(d.tree,segments[[i]])
+}
+   
+}
+
+for (i in 1:length(segments)){
+  lambdaK[[i]] = lambdaK[[i]]/M
+}
+
+```
+
+
+
+```{r echo=FALSE, include=TRUE,fig.height=5, fig.width=5}
+
+lim = c(0.00892,0.0093)
+wd=2
+
+plot(c(1,2,3,4),c(mean(lambdaK[[1]]),mean(lambdaK[[2]]),mean(lambdaK[[3]]),mean(lambdaK[[4]])),type="l",col="darkred",lwd=wd,xlab= "Horse Power category",ylab = "Claim frequency",ylim=lim)
+par(new = TRUE)
+
+plot(c(1,2,3,4),c(mean(lambdaK[[5]]),mean(lambdaK[[6]]),mean(lambdaK[[7]]),mean(lambdaK[[8]])),type="l",xlab= "Horse Power category",lwd=wd,ylab = "Claim frequency",col="darkgreen",ylim=lim)
+
+par(new = TRUE)
+plot(c(1,2,3,4),c(mean(lambdaK[[17]]),mean(lambdaK[[18]]),mean(lambdaK[[19]]),mean(lambdaK[[20]])),type="l",col="red",lwd=wd,lty=3,xlab= "Horse Power category",ylab = "Claim frequency",ylim=lim)
+
+par(new = TRUE)
+
+plot(c(1,2,3,4),c(mean(lambdaK[[21]]),mean(lambdaK[[22]]),mean(lambdaK[[23]]),mean(lambdaK[[24]])),type="l",col="green",lwd=wd,lty=3,xlab= "Horse Power category",ylab = "Claim frequency",ylim=lim)
+
+par(new = TRUE)
+ 
+plot(c(1,2,3,4),c(mean(lambdaK[[25]]),mean(lambdaK[[26]]),mean(lambdaK[[27]]),mean(lambdaK[[28]])),type="l",col="red",lwd=wd,lty=5,xlab= "Horse Power category",ylab = "Claim frequency",ylim=lim)
+
+par(new = TRUE)
+
+plot(c(1,2,3,4),c(mean(lambdaK[[29]]),mean(lambdaK[[30]]),mean(lambdaK[[31]]),mean(lambdaK[[32]])),type="l",col="green",lwd=wd,lty=5,xlab= "Horse Power category",ylab = "Claim frequency",ylim=lim)
+
+par(cex = 0.8)
+legend("topleft",c("Male", "Female","M CarAge<3", "F CarAge<3","M CarAge>=3", "F CarAge>=3"),lwd = c(2,2,2,2,2),lty=c(1,1,3,3,5,5), col=c("darkred","darkgreen","red","green","red","green"),cex=0.8,text.font=6,bty="n")
+
+```
+
+We can observe that the model associate the Male with higher claim frequencies. There is also a positive relation between the Horse power and the claim frequency. Those results have been found in the GLM analysis previously. This graph also shows the influence of the car age: customer with cars of less than 3 years have less claims than customers with older cars. 
+
+We can notice that compared to others factors, the influence of the car age is rather small, which can explain why it is not found significative by the GLM model at a risk of 5%. However one interesting thing to notice is that the difference in claim frequency between Male customers with a car age < 3 years and Male customers with older cars decrease for more powerful cars, while the opposite phenomenon occurs with female.
+
+### 3.4.2 Gender and Area
+
+The results for the Area variable are plotted below.
+
+```{r echo=FALSE, include=TRUE,fig.height=4, fig.width=4}
+
+
+lim = c(0.0088,0.0093)
+wd=2
+
+plot(c(1,2,3,4),c(mean(lambdaK[[9]]),mean(lambdaK[[10]]),mean(lambdaK[[11]]),mean(lambdaK[[12]])),type="l",col="darkblue",lwd=wd,xlab= "Area category",ylab = "Claim frequency",ylim=lim)
+par(new = TRUE)
+
+plot(c(1,2,3,4),c(mean(lambdaK[[13]]),mean(lambdaK[[14]]),mean(lambdaK[[15]]),mean(lambdaK[[16]])),type="l",xlab= "Area category",lwd=wd,ylab = "Claim frequency",col="brown",ylim=lim)
+
+legend("bottomleft",c("Male", "Female"),lwd = c(2,2),lty=c(1,1), col=c("darkblue","brown"),cex=1,text.font=6,bty="n")
+
+
+```
+
+The area 3 (countryside) is the region associated with the smallest claim frequency, similarly to the GLM analysis. The urban and mountain regions are almost at the same level, while the customers in suburban areas have the highest claim frequency.
+
+### 3.4.3 DriverAge and Contract variables
+
+Finally, we examine the influence of the age of the driver on the claim frequency, as well as the influence of the type of contract.
+
+```{r echo=FALSE, include=TRUE,fig.height=5, fig.width=5}
+### prediction of claimfreq depending of age and contract
+# 33-36 37-40 41-44 45-48
+
+ages = c(1,2,3,4)
+
+driverage = c(mean(lambdaK[[33]]),mean(lambdaK[[34]]),mean(lambdaK[[35]]),mean(lambdaK[[36]]))
+
+
+driverage_c1 = c(mean(lambdaK[[37]]),mean(lambdaK[[38]]),mean(lambdaK[[39]]),mean(lambdaK[[40]]))
+
+driverage_c2 = c(mean(lambdaK[[41]]),mean(lambdaK[[42]]),mean(lambdaK[[43]]),mean(lambdaK[[44]]))
+
+driverage_c3 = c(mean(lambdaK[[45]]),mean(lambdaK[[46]]),mean(lambdaK[[47]]),mean(lambdaK[[48]]))
+
+lim = c(0.009,0.0097)
+wd=2
+
+plot(ages,driverage,type="l",col="darkblue",lwd=wd,xlab= "Age categories",ylab = "Claim frequency",ylim=lim,xaxt = "n")
+par(new = TRUE)
+
+plot(ages,driverage_c1,type="l",xlab= "Age categories",lwd=wd,ylab = "Claim frequency",col="darkgreen",ylim=lim,xaxt = "n")
+par(new = TRUE)
+
+plot(ages,driverage_c2,type="l",xlab= "Age categories",lwd=wd,ylab = "Claim frequency",col="darkorange",ylim=lim,xaxt = "n")
+par(new = TRUE)
+
+plot(ages,driverage_c3,type="l",xlab= "Age categories",lwd=wd,ylab = "Claim frequency",col="darkred",ylim=lim,xaxt = "n")
+axis(1, at=1:4, labels=c("age>20","20<age<40","40<age<60","age>60"))
+
+
+
+par(cex = 0.8)
+legend("topright",c("No contracts distinction","basic garantee","intermediate garantee","full garantee"),lwd = c(2,2,2,2,2),lty=c(1,1,1,1), col=c("darkblue","darkgreen","darkorange","darkred"),cex=0.8,text.font=6,bty="n")
+
+#"age>20","20<age<40","40<age<60","age>60"
+```
+
+We can observe that both factors have a big influence on the probabilities of making a claim in the year. Younger customers makes more claims while higher customers with higher garantees will make more claims.
+
+However the difference between having a basic garanty (contract 1) and an intermediate garantee is much lower than the difference between a full garantee and others types of contracts.
+
+In the case of the age of the drivers, the youngest drivers (age<20) makes much more claims than others. There is little difference between the claim frequency of the customers in the categories 20<age<40 and age<60. 
+
+This plot also allow to us to see that the influence of the age seems independant of the type of contract taken: all the generation seem to make, in average, the same choice of insurance depending of their risk. 
+To gain in precision, the difference in base point between the claim frequency of customers having a full garantee and the ones having a basic garantee is plotted below.
+
+```{r echo=FALSE, include=TRUE,fig.height=4, fig.width=4}
+table = matrix(nrow=4,ncol=3)
+rownames(table)= c("age>20","20<age<40","40<age<60","age>60")
+colnames(table) = c("Full garantee","Basic garantee","Difference (base points)")
+
+for (i in 1:4){
+table[i,1] =driverage_c3[i]
+table[i,2] =driverage_c1[i]
+table[i,3] = driverage_c3[i]- driverage_c1[i]
+}
+
+kable(table, caption="Claim frequencies")
+
+
+
+
+```
+
+We can observe that for the 3 first age categories, the difference of claim frequency is very similar, while the difference is lower for customers more than 60 year old.
+
+This could be explained by the fact that the older person have a higher *risk aversion*. This difference in risk aversion could for instance be explained by a change of mentality for this age class. A more detailed analysis of this phenomenon is outside the scope of the project.
+
+
+
+## 3.5 Gradient boosting machine with poisson response
+
+### 3.5.1 Introduction
+
+The purpose of boosting is to sequentially apply a weak regression or classification algorithm to repeatedly modified versions of the data thereby producing a sequence of weak classifiers.\footnote{\textit{The Elements of Statistical Learning},Hastie,Tibshirani and Friedman,2009}.
+
+Gradient Boosting \footnote{Greedy Function Approximation: A Gradient Boosting Machine, Friedman,1999} generalize the boosting methods by allowing the use of any differenciable loss function.
+
+The model can be understood as a form of basis expansion, where the basis functions $b_{m},m= 1;...,M$ are the weak learners.Gradient boosting is typically used with decision trees as base learners.
+
+For a poisson response variable the model is:
+$Log(\frac{Nbclaims}{Exposure})= \sum_{m=1}^{M} v\beta_{m}b(x,\gamma_{m})$
+
+Where the $\beta$ are weights, $\gamma_{m}$ the parameters relative to the tree itself and $v$ a regularizer called learning rate.
+
+Ideally, we would like to find the solutions of
+
+$$ \min_{\beta_{m},\gamma_{m},v,M}  \sum_{i=1}^{N} L \Big ( y_{i},\sum_{m=1}^{M} v\beta_{m}b(x_{i},\gamma_{m}) \Big ) $$
+
+But this problem is too computationally intensive to be solved directly.
+
+Instead we opt for a greedy algorithm, the Gradient Boosting algorithm, which we won't describe here.
+
+In our case, the Poisson deviance is used as loss function.
+
+We actually use a stochastic gradient boosting algorithm. Similarly to the random forest, each tree is fitted on a subsample of the training set drawn at random without replacement. This trick has been proved to substantially improve the performance of the model.\footnote{ "Stochastic Gradient Boosting",Friedman, 2002 }
+
+### 3.5.2 Tuning
+
+The 3 main tuning parameters of a gradient boosting machine model are:
+
+* __The number of iterations M__: The number of trees to add.
+
+* __The complexity of the tree (size or interaction depth)__: determine the order of the interactions taken into account. If J = 2 only main effects will be taken into account.
+
+* __The learning rate v (shrinkage)__ : Scale the value the contribution of each trees. A smaller learning rate will require a high number of iterations for a given training error.
+
+This 3 parameters control the complexity of the model and help to prevent overfitting.
+
+The number of trees is determined by first growing a large number of trees (4000) and observing the evolution of the performance.
+
+The others parameters are tuned using a grid search.
+
+The relative importance plot of the corresponding model is plotted below.
+```{r echo=FALSE, include=TRUE,eval=TRUE,fig.height=4, fig.width=4,fig}
+
+#interaction.depth = 2
+set.seed(1)
+# 
+# GbmP = gbm(Nbclaims~offset(log(Exposure))+Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract, distribution="poisson", data=train,cv.folds=10,shrinkage=0.001,n.trees=4000,train.fraction = 0.5)
+#par(mfrow = c(1,2))
+#gbm.perf(GbmP, plot.it = TRUE, oobag.curve = TRUE, overlay = TRUE,"cv")
+```
+
+
+```{r echo=FALSE, include=FALSE,eval=TRUE,fig.height=6, fig.width=6}
+
+GbmP = gbm(Nbclaims~offset(log(Exposure))+Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract, distribution="poisson", data=train,cv.folds=10,shrinkage=0.001,n.trees=2412,train.fraction = 0.5)
+influence = summary(GbmP)$rel.inf
+
+```
+
+```{r echo=FALSE, include=TRUE,eval=TRUE,fig.height=4, fig.width=10}
+
+
+#par(mfrow = c(1,2),mar = c(0.5,0.5,1,1) + 0.1)
+
+barplot(influence, main="Gender",names.arg=c("Area","DriverAge"," Power"," Contract","Gender","Fract","CarAge","Leasing "),col="darkblue")
+
+# gbm_cv$valid.error
+
+
+# GbmP.pred = data.frame(predict(GbmP,train))
+
+
+```
+
+
+We can observe in the relative importance plot that the driver age,area, contract and powerhorse are the variables who have the most impact in the contruction of the trees. 
+```{r echo=FALSE, include=FALSE,eval = FALSE}
+## Tuning
+library(caret)
+set.seed(2)
+train2 = train[order(train$ClaimFreq,decreasing = TRUE),][1:3240,]
+#0.1654870 best fitn.trees = 2500, interaction.depth = 1 or 2, shrinkage = 0.001 and n.minobsinnode = 10.
+
+sum(train$Nbclaims)
+
+gbmGrid <-  expand.grid(interaction.depth = c(2), 
+                        n.trees =   2500, #1500+(1:3)*500, 
+                        shrinkage = c(0.001),
+                        n.minobsinnode = 10)
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 2,
+                           repeats = 1)
+gbm <- train(Nbclaims~offset(log(Exposure))+Gender+DriverAge+CarAge+Area+Leasing+Power+Fract+Contract, data = train2, 
+                 method = "gbm", 
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid,
+                 distribution="poisson",
+                 verbose = FALSE)
+
+gbm
+summary(gbm)
+trellis.par.set(caretTheme())
+plot(gbm)
+
+#pred = data.frame(predict(gbm,train))
+```
+
+# 4. Conclusions
+
+The objective of this project was to determine the most relevant predictors of the claim frequency. After describing the variable and modeling the claims frequency, some variables appears more important than others.
+
+Indeed, The type of contracts,age of the drivers and area are the most important predictors and should be primarily used for the segmentation of the customers, although the GLM model did not select the age variable.
+
+Compared to those variables, the gender variable seems to have a slightly lower impact on the claim frequency. However it is also an important predictors which have been used by all the model. 
+
+The splitting of the premium and the car Age have a rather minor influence on the claim frequency, and should be used only for a finer segmentation.
+
+Finally, The leasing does not appear to be an important factor and should not be an important criterion for segmentation.
+
+In conclusion, we are now able to have a segmentation of the customers based on their claim frequency, however an analysis of the claim severity will have to be done before being able to determine a grid of customized premiums.
+
+
+
+
+```{r echo=FALSE, include=TRUE}
+
+```
+\newpage
+# 5.Annexe
+
+## 5.1 Descriptive statistics of the test set
+
+
+```{r echo=FALSE, include=TRUE,fig.height=3, fig.width=8}
+
+col_names=c("DriverAge", "CarAge", "Exposure")
+resum=tabsummary(test[-c(1,4,5,6,7,8)],col_names)
+kable(resum,caption="Descriptive statistics of the test set")
+
+par(mfrow = c(1,2),oma = c(5,4,0,0) + 0.1,mar = c(0.5,0.5,1,1) + 0.1)
+
+  barplot(table(test[,1]), main="Gender barplot",names.arg=c("Men","Women"),col="darkblue")
+  
+  barplot(table(test[,4]), main="Area",names.arg=c("suburban","urban","countryside ","Mountains"),col="darkblue")
+ 
+    barplot(table(test[,7]), main="Splitting of the premium",names.arg=c("Monthly","Quarterly","Yearly"),col="darkblue")
+    
+  barplot(table(test[,8]), main="Types of contract",names.arg=c("Basic","intermediate","full"),col="darkblue")
+  
+  barplot(table(test[,5]), main="Leasing",names.arg=c("Yes","No"),col="darkblue")
+```
+
+## 5.2 Mean and standard deviation of categorical variables, by categories (training set)
+
+```{r echo=FALSE,results='asis', include=TRUE,fig.height=3, fig.width=10}
+
+
+par(mfrow = c(1,2),mar = c(0.5,0.5,1,1) + 0.1)
+j=1
+for (i in c(1,4,5,6,7,8) ){
+resum=matrix(ncol=2,nrow=length(unique(train[,i])))
+
+means = aggregate(train$ClaimFreq, by=list(train[,i]), FUN=mean)
+sds = aggregate(train$ClaimFreq, by=list(train[,i]), FUN=sd) 
+k=1
+for (k in 1:length(unique(train[,i]))){
+resum[k,1] = round(means[2][k,][1],4)
+
+resum[k,2] = round(sds[2][k,],4)
+k=k+2
+}
+colnames(resum)=c("Mean","Standard deviation")
+rownames(resum)= cats[[j]]
+print(kable(resum,caption=paste("Claim Frequency by",colnames(train[i]))))
+j = j+1
+
+}
+```
+
+## 5.3 Extreme Gradient Boosting
+
+The Extreme Gradient Boosting (XGBoost) is an implementation of Gradient Boosting.
+XGBoost is sometimes more than 10 time faster than others gradient boosting implementations, and generally have a better predictive performance.
+
+The main features of XGBoost are listed below:
+
+1- Instead of having a tree learn the negative gradient at each stage, the second order Taylor expansion of the loss function is learnt.
+
+2- A regularization term is added to the Taylor expansion so that the new tree minimize under constraint the loss function, which reduces overfitting.
+
+3- Introduce the concept of structure score as a measures how good a tree structure is, when growing a tree the structure score is used as a splitting criterion.
+
+4- Columns sub-sampling: in addition to take the observations on which each tree is trained, a number of features is sampled, similarly to random forests.
+
+5- From the engineering side, a lot of tricks are used to speed up computations (Histogram-based method, sparsity-aware algorithm, better use of multiprocessing and more)
